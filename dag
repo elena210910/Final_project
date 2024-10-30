@@ -10,7 +10,7 @@ from datetime import datetime, timedelta
 from pyspark.sql import SparkSession
 from pyspark.sql.types import IntegerType, FloatType, DateType, StringType
 from pyspark.sql import SparkSession
-import matplotlib.pyplot as plt
+
 
 # Функция для проверки соединения с PostgreSQL
 def query_postgres(**kwargs):
