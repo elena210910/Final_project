@@ -1,0 +1,252 @@
+import requests
+import psycopg2
+import subprocess
+from airflow import DAG
+from airflow.operators.python_operator import PythonOperator
+from airflow.providers.postgres.operators.postgres import PostgresOperator
+from airflow.utils.dates import days_ago
+import random
+from datetime import datetime, timedelta
+from pyspark.sql import SparkSession
+from pyspark.sql.types import IntegerType, FloatType, DateType, StringType
+from pyspark.sql import SparkSession
+import matplotlib.pyplot as plt
+
+# Функция для проверки соединения с PostgreSQL
+def query_postgres(**kwargs):
+    command = [
+        'psql',
+        '-h', 'postgres_user',
+        '-U', 'user',
+        '-d', 'test',
+        '-c', 'SELECT version();'
+    ]
+    env = {"PGPASSWORD": "password"}
+    result = subprocess.run(command, env=env, capture_output=True, text=True)
+
+    if result.returncode == 0:
+        print(f"PostgreSQL version: {result.stdout}")
+    else:
+        print(f"Failed to connect to PostgreSQL, error: {result.stderr}")
+
+# Функция для генерации случайных продаж
+def generate_sales_data():
+    regions = ["North", "South", "East", "West"]
+    num_sales = 100
+    start_date = datetime.now() - timedelta(days=365)
+    sales_data = []
+
+    for i in range(num_sales):
+        sale_id = i + 1
+        customer_id = random.randint(1, 1000)
+        product_id = random.randint(1, 20)# что бы были повторяющиеся купленные товары
+        quantity = random.randint(1, 7)
+        sale_date = (start_date + timedelta(days=random.randint(0, 365))).date()
+        sale_amount = round(quantity * random.uniform(3, 38), 2)
+        region = random.choice(regions)
+        
+        sales_data.append((sale_id, customer_id, product_id, quantity, sale_date, sale_amount, region))
+
+    with open('/opt/airflow/df/sales_data.csv', 'w') as f:
+        f.write('sale_id,customer_id,product_id,quantity,sale_date,sale_amount,region\n')
+        for sale in sales_data:
+            f.write(','.join(map(str, sale)) + '\n')
+
+# Функция для очистки и обработки данных
+def process_sales_data():
+    spark = (SparkSession.builder
+             .appName("SalesAnalysis")
+             .config("spark.jars", "/opt/airflow/jars/postgresql-42.2.23.jar") # путь к драйверу PostgreSQL
+             .config("spark.driver.extraClassPath", "/opt/airflow/jars/postgresql-42.2.23.jar")
+             .config("spark.executor.extraClassPath", "/opt/airflow/jars/postgresql-42.2.23.jar")
+             .getOrCreate())
+             
+    df = spark.read.csv('/opt/airflow/df/sales_data.csv', header=True, inferSchema=True)
+    
+    df = df.dropDuplicates()
+    df = df.withColumn("sale_id", df["sale_id"].cast(IntegerType()))
+    df = df.withColumn("customer_id", df["customer_id"].cast(IntegerType()))
+    df = df.withColumn("product_id", df["product_id"].cast(IntegerType()))
+    df = df.withColumn("quantity", df["quantity"].cast(IntegerType()))
+    df = df.withColumn("sale_amount", df["sale_amount"].cast(FloatType()))
+    df = df.withColumn("sale_date", df["sale_date"].cast(DateType()))
+    df = df.withColumn("region", df["region"].cast(StringType()))
+
+    df.write \                     #вот ту нам установленный драйвер и понадобился
+      .format("jdbc") \
+      .option("url", "jdbc:postgresql://postgres_user:5432/test") \
+      .option("dbtable", "cleaned_sales_data") \
+      .option("user", "user") \
+      .option("password", "password") \
+      .mode("overwrite") \            #перезаписываем, можно сделать append - что бы старые записи сохранялись тоже
+      .save()
+
+# Параметры по умолчанию для DAG
+default_args = {
+    'owner': 'airflow',
+    'depends_on_past': False,
+    'start_date': days_ago(1),
+    'retries': 1,
+    'catchup': False,
+}
+
+# Определение DAG
+dag = DAG(
+    'sales_data_pipeline',
+    default_args=default_args,
+    description='Пайплайн обработки данных о продажах',
+    schedule_interval="45 9 * * 2",  # 12:45 по Москве (UTC+3) каждый вторник
+)
+
+# Задача проверки соединения с PostgreSQL
+query_postgres_task = PythonOperator(
+    task_id='query_postgres',
+    python_callable=query_postgres,
+    dag=dag,
+)
+
+# Задача создания таблицы в PostgreSQL
+create_table = PostgresOperator(
+    task_id='create_table',
+    postgres_conn_id='postgres_default',
+    sql="""
+    CREATE TABLE IF NOT EXISTS cleaned_sales_data (
+        sale_id INT,
+        customer_id INT,
+        product_id INT,
+        quantity INT,
+        sale_date DATE,
+        sale_amount FLOAT,
+        region VARCHAR(50)
+    );
+    """,
+    dag=dag,
+)
+
+# Задача генерации данных
+generate_sales_data_task = PythonOperator(
+    task_id='generate_sales_data',
+    python_callable=generate_sales_data,
+    dag=dag,
+)
+
+# Задача обработки данных
+process_sales_data_task = PythonOperator(
+    task_id='process_sales_data',
+    python_callable=process_sales_data,
+    dag=dag,
+)
+# функция для агрегации данных
+def aggregate_sales_data():
+    spark = (SparkSession.builder
+             .appName("SalesAnalysis")
+             .config("spark.jars", "/opt/airflow/jars/postgresql-42.2.23.jar") # Укажи путь к драйверу PostgreSQL
+             .config("spark.driver.extraClassPath", "/opt/airflow/jars/postgresql-42.2.23.jar")
+             .config("spark.executor.extraClassPath", "/opt/airflow/jars/postgresql-42.2.23.jar")
+             .getOrCreate())
+
+    df = spark.read.format("jdbc") \
+        .option("url", "jdbc:postgresql://postgres_user:5432/test") \
+        .option("dbtable", "cleaned_sales_data") \
+        .option("user", "user") \
+        .option("password", "password") \
+        .load()
+
+    # Создание временной таблицы 
+    df.createOrReplaceTempView("sales_data")
+    
+    #  GROUP BY справился
+    aggregated_df = spark.sql(""" SELECT region, product_id,
+                                  COUNT(sale_id) AS total_sales,
+                                  ROUND(SUM(sale_amount), 2) AS total_amount,
+                                  ROUND(AVG(sale_amount), 2) AS average_sale_amount
+                                  FROM sales_data
+                                  GROUP BY region, product_id """)
+    aggregated_df.write \
+        .format("jdbc") \
+        .option("url", "jdbc:postgresql://postgres_user:5432/test") \
+        .option("dbtable", "aggregated_sales_data") \
+        .option("user", "user") \
+        .option("password", "password") \
+        .mode("overwrite") \
+        .save()
+    
+
+aggregate_sales_data_task = PythonOperator(
+     task_id='aggregate_sales_data', 
+     python_callable=aggregate_sales_data, 
+     dag=dag, )
+
+# создаю таблицу в clickhouse. Добавляю новый столбец import_date
+def create_clickhouse_table():
+    query = """
+    CREATE TABLE IF NOT EXISTS aggregated_sales_data (
+       region String,
+       product_id Int32,
+       total_sales Int32,
+       total_amount Float32,
+       average_sale_amount Float32,
+       import_date Date    
+       ) ENGINE = MergeTree()
+       ORDER BY (region, product_id);"""
+    response = requests.post('http://clickhouse_user:8123', params={'query': query})
+
+    if response.status_code==200:
+        print("Table created successfully")
+    else:
+        print(f"Error creating table: {response.text}")  
+
+def load_to_clickhouse():
+    # Подключение к PostgreSQL
+    conn = psycopg2.connect(
+        dbname="test",
+        user="user",
+        password="password",
+        host="postgres_user",
+        port="5432"    # не обязательно указывать, по умолчанию он всегда такой
+    )
+    cur = conn.cursor()  
+    cur.execute("SELECT region, product_id, total_sales, total_amount, average_sale_amount FROM aggregated_sales_data")
+
+    # Получаем дату импорта
+    import_date = datetime.now().strftime('%Y-%m-%d')
+
+    # Формируем данные для загрузки в ClickHouse
+    data = []   #создаю список
+    for row in cur.fetchall(): 
+        region, product_id, total_sales, total_amount, average_sale_amount = row
+        data.append(f"('{region}', {product_id}, {total_sales}, {total_amount}, {average_sale_amount}, '{import_date}')")
+
+    data_str = ",".join(data)
+    print(f"Data to be loaded into ClickHouse: {data_str}") # Логирование
+
+    # Очистка таблицы перед вставкой данных. Каждый раз при хагрузке данных, старые таблицы и записи удаляются
+    truncate_query = "TRUNCATE TABLE aggregated_sales_data"
+    requests.post("http://clickhouse_user:8123", params={'query': truncate_query})
+    
+    # Запрос для вставки данных в ClickHouse
+    query = f"INSERT INTO aggregated_sales_data (region, product_id, total_sales, total_amount, average_sale_amount, import_date) VALUES {data_str}"
+    response = requests.post("http://clickhouse_user:8123", params={'query': query})
+    if response.status_code == 200:
+        print("Data loaded successfully")
+    else:
+        print(f"Error loading data: {response.text}")
+
+    cur.close()
+    conn.close()
+
+create_clickhouse_table_task = PythonOperator(
+    task_id='create_clickhouse_table',
+    python_callable=create_clickhouse_table,
+    dag=dag,
+)
+
+load_to_clickhouse_task = PythonOperator(
+    task_id='load_to_clickhouse',
+    python_callable=load_to_clickhouse,
+    dag=dag,
+)
+
+# Определение последовательности задач
+query_postgres_task >> create_table >> generate_sales_data_task >> process_sales_data_task >> aggregate_sales_data_task>> create_clickhouse_table_task >> load_to_clickhouse_task
+
