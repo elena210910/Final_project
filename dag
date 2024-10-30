@@ -38,7 +38,7 @@ def generate_sales_data():
 
     for i in range(num_sales):
         sale_id = i + 1
-        customer_id = random.randint(1, 1000)
+        customer_id = random.randint(1, 1000)  # будут повторные покупатели когда строк будет больше 100))
         product_id = random.randint(1, 20)# что бы были повторяющиеся купленные товары
         quantity = random.randint(1, 7)
         sale_date = (start_date + timedelta(days=random.randint(0, 365))).date()
