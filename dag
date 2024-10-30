@@ -32,7 +32,7 @@ def query_postgres(**kwargs):
 # Функция для генерации случайных продаж
 def generate_sales_data():
     regions = ["North", "South", "East", "West"]
-    num_sales = 100
+    num_sales = 100   # я сделала на 100 строк, но можно поменять на 1_000_000
     start_date = datetime.now() - timedelta(days=365)
     sales_data = []
 
