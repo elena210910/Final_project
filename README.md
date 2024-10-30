@@ -49,7 +49,7 @@
    
 
 
-7. Сгенерированный функцией **csv файл** находится в контейнере airflow-webserver, надо зайти туда и напимать команду cd /opt/airflow/df/  в директории, которой
+7. Сгенерированный функцией **csv файл** находится в контейнере airflow-webserver, надо зайти в него и написать команду cd /opt/airflow/df/  , это директория, в которой
    я сохранила созданный  файл. Копирую его к себе на рабочий стол, что бы показать вам. [sales_data.csv](https://drive.google.com/file/d/1oeOJF-3nxBtw8Rv6IKGnT1byPiMLbG2H/view?usp=sharing)
 
 
